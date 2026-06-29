@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #172033;
+  background: #eaf2fb;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+@layer components {
+  .glass {
+    @apply border border-white/70 bg-white/55 shadow-soft backdrop-blur-xl;
+  }
+
+  .glass-strong {
+    @apply border border-white/80 bg-white/75 shadow-soft backdrop-blur-xl;
+  }
+
+  .btn {
+    @apply inline-flex min-h-12 items-center justify-center rounded-2xl px-5 py-3 text-sm font-semibold transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .btn-primary {
+    @apply btn bg-slate-900 text-white shadow-glow hover:bg-slate-800;
+  }
+
+  .btn-secondary {
+    @apply btn border border-slate-200/80 bg-white/75 text-slate-800 hover:bg-white;
+  }
+
+  .btn-ghost {
+    @apply btn bg-transparent text-slate-600 hover:bg-white/55;
+  }
+
+  .input {
+    @apply w-full rounded-2xl border border-white/70 bg-white/75 px-4 py-3 text-base font-medium text-slate-900 outline-none ring-sky-300 transition placeholder:text-slate-400 focus:ring-4;
+  }
+
+  .label {
+    @apply text-xs font-bold uppercase tracking-[0.22em] text-slate-500;
+  }
+
+  .tile {
+    @apply flex h-14 w-12 items-center justify-center rounded-2xl border text-xl font-black shadow-sm transition sm:h-16 sm:w-14;
+  }
+}
+
+@keyframes float-soft {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}

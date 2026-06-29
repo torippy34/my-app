@@ -1,0 +1,15 @@
+name = "number-veil-api"
+main = "worker/src/index.ts"
+compatibility_date = "2026-04-07"
+
+[[durable_objects.bindings]]
+name = "ROOM_REGISTRY"
+class_name = "RoomRegistry"
+
+[[durable_objects.bindings]]
+name = "GAME_ROOM"
+class_name = "GameRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomRegistry", "GameRoom"]
