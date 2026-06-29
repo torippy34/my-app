@@ -494,7 +494,7 @@ export class GameRoom {
 
     if (target) {
       target.solved = true;
-      this.room.logs.push(logEntry('correct', `正解。${player.name} は ${value} を1枚解決しました`));
+      this.room.logs.push(logEntry('correct', `正解。${player.name} は ${value} を1枚あてました`));
 
       if (hand.every((tile) => tile.solved)) {
         player.finishedAt = now();
