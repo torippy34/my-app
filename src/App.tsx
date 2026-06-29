@@ -192,7 +192,7 @@ function TopScreen({
       <div className="glass rounded-[2.5rem] p-6 sm:p-8 lg:p-10">
         <div className="mb-10 max-w-xl">
           <p className="label mb-4">Browser / Realtime / Minimal</p>
-          <h2 className="text-4xl font-black tracking-[-0.06em] text-slate-950 sm:text-6xl">見える数字と、見えない自分。</h2>
+          <h2 className="text-4xl font-black tracking-[-0.06em] text-slate-950 sm:text-6xl">Pomemo</h2>
           <p className="mt-5 text-base leading-8 text-slate-600 sm:text-lg">
             最大6人で遊べる、個人利用向けの数字推理ゲームです。インストール不要、スマホ縦画面でもそのまま遊べます。
           </p>
@@ -340,7 +340,7 @@ function GameScreen({ view, send }: { view: ClientView; send: (type: string, pay
               <p className="label">Room {view.roomId}</p>
               <h2 className="text-2xl font-black">手番：{view.currentPlayerName ?? '-'}</h2>
             </div>
-            <div className="rounded-full bg-white/75 px-4 py-2 text-sm font-bold text-slate-600">{view.self.canSeeAll ? '全手札表示' : '自分の未解決札は非表示'}</div>
+            <div className="rounded-full bg-white/75 px-4 py-2 text-sm font-bold text-slate-600">{view.self.canSeeAll ? '全手札表示' : '自分の当てていない札は非表示'}</div>
           </div>
         </div>
 
