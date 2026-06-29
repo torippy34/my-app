@@ -159,7 +159,7 @@ function Header({ view, connectionState, leave }: { view: ClientView | null; con
     <header className="glass flex items-center justify-between rounded-[2rem] px-4 py-3 sm:px-5">
       <div>
         <p className="label">Number Veil</p>
-        <h1 className="text-xl font-black tracking-tight text-slate-950 sm:text-2xl">数字の影を読むゲーム</h1>
+        <h1 className="text-xl font-black tracking-tight text-slate-950 sm:text-2xl">自分の持ってる数字くらい当てれないとね</h1>
       </div>
       <div className="flex items-center gap-2">
         <span className="hidden rounded-full bg-white/70 px-3 py-2 text-xs font-bold text-slate-500 sm:inline-flex">{connectionState}</span>
