@@ -1,4 +1,4 @@
-name = "number-veil-api"
+name = "my-app"
 main = "worker/src/index.ts"
 compatibility_date = "2026-04-07"
 
