@@ -13,7 +13,7 @@ Number Veil は、Domemo 風の「自分の数字だけ見えない」数字推�
 - Realtime / State: Cloudflare Durable Objects
 - 通信: WebSocket
 - DB / 有料外部サービス: 不使用
-- 最大同時ルーム数: 2
+- 最大同時ルーム数: 5
 
 ## 主要機能
 
@@ -91,7 +91,7 @@ Durable Object が保持するルーム状態です。
 
 全体のルーム数を管理します。
 
-- 最大2部屋制限
+- 最大5部屋制限
 - 未使用3桁IDの生成
 - 無効化されたルームの除外
 

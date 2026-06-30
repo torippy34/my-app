@@ -6,6 +6,7 @@ import type {
   GameLog,
   GameSettings,
   JoinKind,
+  LastGuessResult,
   Player,
   RankingEntry,
   RoomData,
@@ -15,12 +16,14 @@ import type {
 
 const ROOM_STORAGE_KEY = 'room';
 const REGISTRY_STORAGE_KEY = 'activeRoomIds';
+const MAX_ACTIVE_ROOMS = 5;
 const EMPTY_ROOM_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_SETTINGS: GameSettings = {
   maxNumber: 10,
   maxPlayers: 6,
   handSize: 5,
   allowSpectators: true,
+  turnTimeLimitSeconds: 5,
 };
 
 type Session = {
@@ -173,8 +176,8 @@ export class RoomRegistry {
     const active = await this.getActiveRooms();
     await this.prune(active);
 
-    if (active.size >= 2) {
-      return json({ error: '現在作成できるルームは2部屋までです' }, { status: 409 });
+    if (active.size >= MAX_ACTIVE_ROOMS) {
+      return json({ error: `現在作成できるルームは${MAX_ACTIVE_ROOMS}部屋までです` }, { status: 409 });
     }
 
     const roomId = this.generateUnusedRoomId(active);
@@ -265,18 +268,31 @@ export class GameRoom {
 
   async alarm() {
     await this.load();
-    if (this.sessions.size > 0 || !this.room?.initialized) return;
+    if (!this.room?.initialized) return;
 
-    const roomId = this.room.roomId;
-    this.room = undefined;
-    await this.state.storage.deleteAll();
+    const current = now();
 
-    const registry = this.env.ROOM_REGISTRY.get(this.env.ROOM_REGISTRY.idFromName('global'));
-    await registry.fetch('https://registry.local/release', {
-      method: 'POST',
-      body: JSON.stringify({ roomId }),
-      headers: { 'content-type': 'application/json' },
-    });
+    if (this.room.emptyRoomCleanupAt && current >= this.room.emptyRoomCleanupAt) {
+      const roomId = this.room.roomId;
+      this.room = undefined;
+      await this.state.storage.deleteAll();
+
+      const registry = this.env.ROOM_REGISTRY.get(this.env.ROOM_REGISTRY.idFromName('global'));
+      await registry.fetch('https://registry.local/release', {
+        method: 'POST',
+        body: JSON.stringify({ roomId }),
+        headers: { 'content-type': 'application/json' },
+      });
+      return;
+    }
+
+    if (this.sessions.size > 0 && this.room.phase === 'playing' && this.room.turnEndsAt && current >= this.room.turnEndsAt) {
+      this.handleTurnTimeout();
+      await this.save();
+      this.broadcast();
+    }
+
+    await this.scheduleAlarm();
   }
 
   private async load() {
@@ -320,12 +336,14 @@ export class GameRoom {
       void this.handleClose(server);
     });
 
-    void this.save().then(() => this.broadcast());
+    void this.save().then(() => this.scheduleAlarm()).then(() => this.broadcast());
     return new Response(null, { status: 101, webSocket: client });
   }
 
   private join(userId: string, name: string, requestedKind: JoinKind): { ok: true } | { ok: false; message: string } {
     if (!this.room) return { ok: false, message: 'ルームが見つかりません' };
+
+    this.room.emptyRoomCleanupAt = undefined;
 
     const existingPlayer = this.room.players.find((player) => player.id === userId);
     const existingSpectator = this.room.spectators.find((spectator) => spectator.id === userId);
@@ -400,6 +418,7 @@ export class GameRoom {
     }
 
     await this.save();
+    await this.scheduleAlarm();
     this.broadcast();
   }
 
@@ -426,7 +445,11 @@ export class GameRoom {
       this.broadcast();
     }
 
-    if (this.sessions.size === 0) await this.state.storage.setAlarm(Date.now() + EMPTY_ROOM_TTL_MS);
+    if (this.sessions.size === 0 && this.room?.initialized) {
+      this.room.emptyRoomCleanupAt = now() + EMPTY_ROOM_TTL_MS;
+      await this.save();
+      await this.scheduleAlarm();
+    }
   }
 
   private updateSettings(userId: string, payload: unknown) {
@@ -441,6 +464,7 @@ export class GameRoom {
     if (typeof input.handSize === 'number') next.handSize = clamp(input.handSize, 3, 8);
     if (typeof input.maxPlayers === 'number') next.maxPlayers = clamp(input.maxPlayers, Math.max(2, this.room.players.length), 6);
     if (typeof input.allowSpectators === 'boolean') next.allowSpectators = input.allowSpectators;
+    if (typeof input.turnTimeLimitSeconds === 'number') next.turnTimeLimitSeconds = clamp(input.turnTimeLimitSeconds, 1, 60);
 
     this.room.settings = next;
     this.room.logs.push(logEntry('settings', 'ホストがゲーム設定を更新しました'));
@@ -471,7 +495,9 @@ export class GameRoom {
     this.room.deck = deck;
     this.room.phase = 'playing';
     this.room.rankings = [];
+    this.room.lastGuessResult = undefined;
     this.room.currentPlayerId = first.id;
+    this.resetTurnTimer();
     this.room.logs.push(logEntry('start', `ゲーム開始。最初の手番は ${first.name} です`));
   }
 
@@ -492,8 +518,21 @@ export class GameRoom {
     const target = hand.find((tile) => !tile.solved && tile.value === value);
     this.room.logs.push(logEntry('guess', `${player.name} が ${value} を宣言しました`));
 
+    const setLastGuessResult = (correct: boolean) => {
+      if (!this.room) return;
+      this.room.lastGuessResult = {
+        id: crypto.randomUUID(),
+        playerId: player.id,
+        playerName: player.name,
+        value,
+        correct,
+        at: now(),
+      } satisfies LastGuessResult;
+    };
+
     if (target) {
       target.solved = true;
+      setLastGuessResult(true);
       this.room.logs.push(logEntry('correct', `正解。${player.name} は ${value} を1枚あてました`));
 
       if (hand.every((tile) => tile.solved)) {
@@ -503,10 +542,14 @@ export class GameRoom {
 
         if (this.finishIfNeeded()) return;
         this.advanceTurnFrom(userId);
+        return;
       }
+
+      this.resetTurnTimer();
       return;
     }
 
+    setLastGuessResult(false);
     this.room.logs.push(logEntry('wrong', `不正解。${player.name} の手番は終了です`));
     this.advanceTurnFrom(userId);
   }
@@ -519,6 +562,7 @@ export class GameRoom {
       this.room.rankings.push({ playerId: last.id, name: last.name, rank: this.room.players.length });
       this.room.phase = 'finished';
       this.room.currentPlayerId = undefined;
+      this.room.turnEndsAt = undefined;
       this.room.logs.push(logEntry('game-over', `ゲーム終了。最後に残ったのは ${last.name} です`));
       return true;
     }
@@ -533,10 +577,53 @@ export class GameRoom {
       const candidate = players[(startIndex + offset + players.length) % players.length];
       if (!candidate.finishedAt) {
         this.room.currentPlayerId = candidate.id;
+        this.resetTurnTimer();
         return;
       }
     }
     this.room.currentPlayerId = undefined;
+    this.room.turnEndsAt = undefined;
+  }
+
+  private resetTurnTimer() {
+    if (!this.room || this.room.phase !== 'playing' || !this.room.currentPlayerId) {
+      if (this.room) this.room.turnEndsAt = undefined;
+      return;
+    }
+
+    this.room.turnEndsAt = now() + this.room.settings.turnTimeLimitSeconds * 1000;
+  }
+
+  private handleTurnTimeout() {
+    if (!this.room || this.room.phase !== 'playing' || !this.room.currentPlayerId) return;
+
+    const player = this.room.players.find((item) => item.id === this.room?.currentPlayerId);
+    if (!player || player.finishedAt) {
+      this.room.turnEndsAt = undefined;
+      return;
+    }
+
+    this.room.logs.push(logEntry('timeout', `時間切れ。${player.name} の手番は終了です`));
+    this.advanceTurnFrom(player.id);
+  }
+
+  private async scheduleAlarm() {
+    if (!this.room?.initialized) {
+      await this.state.storage.deleteAlarm();
+      return;
+    }
+
+    const alarms = [
+      this.room.emptyRoomCleanupAt,
+      this.sessions.size > 0 && this.room.phase === 'playing' ? this.room.turnEndsAt : undefined,
+    ].filter((value): value is number => typeof value === 'number');
+
+    if (alarms.length === 0) {
+      await this.state.storage.deleteAlarm();
+      return;
+    }
+
+    await this.state.storage.setAlarm(Math.min(...alarms));
   }
 
   private returnToLobby(userId: string) {
@@ -547,6 +634,8 @@ export class GameRoom {
     this.room.hands = {};
     this.room.deck = [];
     this.room.currentPlayerId = undefined;
+    this.room.turnEndsAt = undefined;
+    this.room.lastGuessResult = undefined;
     this.room.rankings = [];
     this.room.players = this.room.players.map((player) => ({ ...player, finishedAt: undefined }));
     this.room.logs.push(logEntry('system', 'ロビーに戻りました。同じ設定で再戦できます'));
@@ -624,6 +713,8 @@ export class GameRoom {
       spectators: this.room.spectators.map((item) => ({ id: item.id, name: item.name, connected: item.connected })),
       currentPlayerId: this.room.currentPlayerId,
       currentPlayerName: currentPlayer?.name,
+      turnEndsAt: this.room.turnEndsAt,
+      lastGuessResult: this.room.lastGuessResult,
       rankings: [...this.room.rankings].sort((a: RankingEntry, b: RankingEntry) => a.rank - b.rank),
       logs: this.room.logs.slice(-50),
       dealCheck,

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ClientPlayer, ClientTile, ClientView, GameLog, GameSettings, JoinKind, ServerMessage } from './types';
+import { useEffect, useRef, useState } from 'react';
+import type { ClientPlayer, ClientTile, ClientView, GameLog, GameSettings, JoinKind, LastGuessResult, ServerMessage } from './types';
 
 const USER_ID_KEY = 'number-veil-user-id';
+const SE_VOLUME_KEY = 'number-veil-se-volume';
 const workerBase = (import.meta.env.VITE_WORKER_URL?.replace(/\/$/, '') ?? (location.hostname === 'localhost' ? 'http://localhost:8787' : location.origin));
 const wsBase = workerBase.replace(/^http/, 'ws');
 
@@ -13,8 +14,61 @@ const getUserId = () => {
   return next;
 };
 
+const getInitialSeVolume = () => {
+  const stored = localStorage.getItem(SE_VOLUME_KEY);
+  const parsed = stored === null ? 0.5 : Number(stored);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : 0.5;
+};
+
 const formatTime = (at: number) =>
   new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(at));
+
+let audioContext: AudioContext | null = null;
+
+const getAudioContext = () => {
+  const AudioContextClass =
+    window.AudioContext ??
+    (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+
+  if (!AudioContextClass) return null;
+  if (!audioContext) audioContext = new AudioContextClass();
+
+  void audioContext.resume();
+  return audioContext;
+};
+
+const playTone = (frequency: number, durationMs: number, startOffsetMs = 0, volume = 0.5) => {
+  const context = getAudioContext();
+  const peakGain = Math.max(0, Math.min(1, volume)) * 0.09;
+  if (!context || peakGain <= 0) return;
+
+  const startAt = context.currentTime + startOffsetMs / 1000;
+  const endAt = startAt + durationMs / 1000;
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+
+  oscillator.type = 'sine';
+  oscillator.frequency.setValueAtTime(frequency, startAt);
+
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.exponentialRampToValueAtTime(peakGain, startAt + 0.015);
+  gain.gain.exponentialRampToValueAtTime(0.0001, endAt);
+
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(startAt);
+  oscillator.stop(endAt + 0.03);
+};
+
+const playCorrectSe = (volume: number) => {
+  playTone(880, 80, 0, volume);
+  playTone(1320, 110, 85, volume);
+};
+
+const playWrongSe = (volume: number) => {
+  playTone(220, 120, 0, volume);
+  playTone(165, 150, 105, volume);
+};
 
 const logTone: Record<GameLog['type'], string> = {
   join: 'bg-sky-50 text-sky-700',
@@ -24,6 +78,7 @@ const logTone: Record<GameLog['type'], string> = {
   guess: 'bg-white text-slate-600',
   correct: 'bg-teal-50 text-teal-700',
   wrong: 'bg-rose-50 text-rose-700',
+  timeout: 'bg-orange-50 text-orange-700',
   finish: 'bg-amber-50 text-amber-700',
   'game-over': 'bg-slate-900 text-white',
   system: 'bg-slate-100 text-slate-600',
@@ -36,7 +91,37 @@ function App() {
   const [view, setView] = useState<ClientView | null>(null);
   const [error, setError] = useState('');
   const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'connected' | 'disconnected'>('idle');
+  const [seVolume, setSeVolumeState] = useState(getInitialSeVolume);
   const wsRef = useRef<WebSocket | null>(null);
+  const [visibleGuess, setVisibleGuess] = useState<LastGuessResult | null>(null);
+  const lastGuessResultIdRef = useRef<string | null>(null);
+  const seVolumeRef = useRef(seVolume);
+
+  const setSeVolume = (value: number) => {
+    const next = Math.max(0, Math.min(1, value));
+    seVolumeRef.current = next;
+    setSeVolumeState(next);
+    localStorage.setItem(SE_VOLUME_KEY, String(next));
+  };
+
+  useEffect(() => {
+    seVolumeRef.current = seVolume;
+  }, [seVolume]);
+
+  const showGuessResult = (result?: LastGuessResult) => {
+    if (!result || lastGuessResultIdRef.current === result.id) return;
+
+    lastGuessResultIdRef.current = result.id;
+    setVisibleGuess(result);
+
+    const currentSeVolume = seVolumeRef.current;
+    if (result.correct) playCorrectSe(currentSeVolume);
+    else playWrongSe(currentSeVolume);
+
+    window.setTimeout(() => {
+      setVisibleGuess((current) => (current?.id === result.id ? null : current));
+    }, 1250);
+  };
 
   const send = (type: string, payload?: unknown) => {
     const ws = wsRef.current;
@@ -67,6 +152,8 @@ function App() {
     if (!validateName() || !validateRoomId(targetRoomId)) return;
 
     wsRef.current?.close();
+    lastGuessResultIdRef.current = null;
+    setVisibleGuess(null);
     setError('');
     setConnectionState('connecting');
 
@@ -82,6 +169,7 @@ function App() {
     ws.onmessage = (event) => {
       const message = JSON.parse(event.data) as ServerMessage;
       if (message.type === 'view') {
+        showGuessResult(message.view.lastGuessResult);
         setView(message.view);
         setRoomId(message.view.roomId);
         setError('');
@@ -118,12 +206,25 @@ function App() {
     send('leave');
     wsRef.current?.close(1000, 'leave');
     wsRef.current = null;
+    lastGuessResultIdRef.current = null;
+    setVisibleGuess(null);
     setView(null);
     setConnectionState('idle');
   };
 
   useEffect(() => {
-    return () => wsRef.current?.close();
+    const unlockAudio = () => {
+      void getAudioContext()?.resume();
+    };
+
+    window.addEventListener('pointerdown', unlockAudio);
+    window.addEventListener('keydown', unlockAudio);
+
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+      wsRef.current?.close();
+    };
   }, []);
 
   return (
@@ -147,7 +248,7 @@ function App() {
           />
         )}
         {view?.phase === 'lobby' && <LobbyScreen view={view} send={send} leave={leave} />}
-        {view?.phase === 'playing' && <GameScreen view={view} send={send} />}
+        {view?.phase === 'playing' && <GameScreen view={view} send={send} visibleGuess={visibleGuess} seVolume={seVolume} setSeVolume={setSeVolume} />}
         {view?.phase === 'finished' && <ResultScreen view={view} send={send} />}
       </div>
     </main>
@@ -157,9 +258,16 @@ function App() {
 function Header({ view, connectionState, leave }: { view: ClientView | null; connectionState: string; leave: () => void }) {
   return (
     <header className="glass flex items-center justify-between rounded-[2rem] px-4 py-3 sm:px-5">
-      <div>
-        <p className="label">Number Veil</p>
-        <h1 className="text-xl font-black tracking-tight text-slate-950 sm:text-2xl">自分の持ってる数字くらい当てれないとね</h1>
+      <div className="flex items-center gap-3">
+        <img
+          src="/pomemo-dove.svg"
+          alt="Pomemo logo"
+          className="h-12 w-12 rounded-2xl border border-white/80 bg-white/70 p-1.5 shadow-soft"
+        />
+        <div>
+          <p className="label">Pomemo</p>
+          <h1 className="text-xl font-black tracking-tight text-slate-950 sm:text-2xl">Pomemo</h1>
+        </div>
       </div>
       <div className="flex items-center gap-2">
         <span className="hidden rounded-full bg-white/70 px-3 py-2 text-xs font-bold text-slate-500 sm:inline-flex">{connectionState}</span>
@@ -277,6 +385,7 @@ function LobbyScreen({ view, send, leave }: { view: ClientView; send: (type: str
           <RangeSetting label="最大数字" value={view.settings.maxNumber} min={1} max={10} disabled={!view.self.isHost} onChange={(value) => updateSetting('maxNumber', value)} />
           <RangeSetting label="最大プレイヤー数" value={view.settings.maxPlayers} min={2} max={6} disabled={!view.self.isHost} onChange={(value) => updateSetting('maxPlayers', value)} />
           <RangeSetting label="手札枚数" value={view.settings.handSize} min={3} max={8} disabled={!view.self.isHost} onChange={(value) => updateSetting('handSize', value)} />
+          <RangeSetting label="秒数調整" value={view.settings.turnTimeLimitSeconds} min={1} max={60} disabled={!view.self.isHost} suffix="秒" onChange={(value) => updateSetting('turnTimeLimitSeconds', value)} />
           <label className="rounded-3xl border border-white/70 bg-white/55 p-4">
             <span className="label">観戦許可</span>
             <button
@@ -315,44 +424,81 @@ function Roster({ title, people, hostId }: { title: string; people: Array<{ id: 
   );
 }
 
-function RangeSetting({ label, value, min, max, disabled, onChange }: { label: string; value: number; min: number; max: number; disabled: boolean; onChange: (value: number) => void }) {
+function RangeSetting({
+  label,
+  value,
+  min,
+  max,
+  disabled,
+  suffix = '',
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  disabled: boolean;
+  suffix?: string;
+  onChange: (value: number) => void;
+}) {
   return (
     <label className="rounded-3xl border border-white/70 bg-white/55 p-4">
       <span className="label">{label}</span>
       <div className="mt-3 flex items-center gap-3">
         <input className="w-full accent-slate-900" type="range" min={min} max={max} value={value} disabled={disabled} onChange={(event) => onChange(Number(event.target.value))} />
-        <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-lg font-black text-slate-900">{value}</span>
+        <span className="flex h-11 min-w-11 items-center justify-center rounded-2xl bg-white px-3 text-lg font-black text-slate-900">{value}{suffix}</span>
       </div>
     </label>
   );
 }
 
-function GameScreen({ view, send }: { view: ClientView; send: (type: string, payload?: unknown) => void }) {
+function GameScreen({
+  view,
+  send,
+  visibleGuess,
+  seVolume,
+  setSeVolume,
+}: {
+  view: ClientView;
+  send: (type: string, payload?: unknown) => void;
+  visibleGuess: LastGuessResult | null;
+  seVolume: number;
+  setSeVolume: (value: number) => void;
+}) {
   const selfPlayer = view.players.find((player) => player.id === view.self.id);
   const otherPlayers = view.players.filter((player) => player.id !== view.self.id);
+  const [nowMs, setNowMs] = useState(Date.now());
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 250);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const remainingSeconds = view.turnEndsAt ? Math.max(0, Math.ceil((view.turnEndsAt - nowMs) / 1000)) : null;
 
   return (
     <section className="grid gap-4 lg:grid-cols-[1fr_360px]">
       <div className="space-y-4">
-        <div className="glass-strong rounded-[2.2rem] p-4 sm:p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="label">Room {view.roomId}</p>
-              <h2 className="text-2xl font-black">手番：{view.currentPlayerName ?? '-'}</h2>
-            </div>
-            <div className="rounded-full bg-white/75 px-4 py-2 text-sm font-bold text-slate-600">{view.self.canSeeAll ? '全手札表示' : '自分の当てていない札は非表示'}</div>
-          </div>
-        </div>
-
         <div className="grid gap-4 md:grid-cols-2">
-          {otherPlayers.map((player) => <PlayerBoard key={player.id} player={player} />)}
+          {otherPlayers.map((player) => (
+            <PlayerBoard key={player.id} player={player} guessResult={visibleGuess?.playerId === player.id ? visibleGuess : null} />
+          ))}
         </div>
 
         {selfPlayer && (
-          <div className="glass-strong rounded-[2.2rem] p-4 sm:p-5">
-            <div className="mb-3 flex items-center justify-between">
-              <p className="label">Your hand</p>
-              <span className="text-sm font-bold text-slate-500">{view.self.isFinished ? '上がり / 観戦中' : view.self.canAct ? 'あんたの番です' : '待機中'}</span>
+          <div
+            className={`rounded-[2.2rem] border p-4 transition sm:p-5 ${
+              selfPlayer.isCurrent
+                ? 'border-sky-300 bg-sky-50/75 shadow-[0_0_36px_rgba(56,189,248,0.32)] backdrop-blur-xl'
+                : 'glass-strong'
+            }`}
+          >
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="relative">
+                <p className="label">Your hand</p>
+                <GuessResultCard result={visibleGuess?.playerId === view.self.id ? visibleGuess : null} />
+              </div>
+              <span className="rounded-full bg-white/75 px-3 py-1.5 text-xs font-black text-slate-600">{view.self.isFinished ? '上がり / 観戦中' : selfPlayer.isCurrent ? 'ACTIVE' : 'WAIT'}</span>
             </div>
             <TileRow tiles={selfPlayer.hand} large />
           </div>
@@ -360,6 +506,8 @@ function GameScreen({ view, send }: { view: ClientView; send: (type: string, pay
       </div>
 
       <aside className="space-y-4">
+        <CountdownPanel roomId={view.roomId} remainingSeconds={remainingSeconds} canSeeAll={view.self.canSeeAll} />
+        <SeVolumeControl seVolume={seVolume} setSeVolume={setSeVolume} />
         <div className="glass rounded-[2.2rem] p-4 sm:p-5">
           <p className="label mb-3">Declare</p>
           {view.self.kind === 'spectator' || view.self.isFinished ? (
@@ -385,13 +533,34 @@ function GameScreen({ view, send }: { view: ClientView; send: (type: string, pay
   );
 }
 
-function PlayerBoard({ player }: { player: ClientPlayer }) {
+function CountdownPanel({ roomId, remainingSeconds, canSeeAll }: { roomId: string; remainingSeconds: number | null; canSeeAll: boolean }) {
+  const isWarning = remainingSeconds !== null && remainingSeconds <= 2;
+
   return (
-    <div className={`rounded-[2rem] border p-4 transition ${player.isCurrent ? 'border-sky-300 bg-white/80 shadow-glow' : 'border-white/70 bg-white/55 shadow-soft backdrop-blur-xl'}`}>
+    <div className="glass rounded-[2.2rem] p-4 sm:p-5">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <p className="label">Room {roomId}</p>
+          <h3 className="text-xl font-black text-slate-900">秒数カウンター</h3>
+        </div>
+        <span className="rounded-full bg-white/75 px-3 py-1.5 text-xs font-bold text-slate-500">{canSeeAll ? '全手札表示' : '通常表示'}</span>
+      </div>
+      <div className={`rounded-[1.7rem] px-5 py-4 text-center font-black transition ${isWarning ? 'bg-rose-50 text-rose-600 shadow-[0_0_26px_rgba(244,63,94,0.18)]' : 'bg-sky-50 text-sky-700 shadow-[0_0_26px_rgba(56,189,248,0.18)]'}`}>
+        <span className="text-sm uppercase tracking-[0.18em] opacity-70">COUNTDOWN</span>
+        <div className="mt-1 text-5xl tracking-tight">{remainingSeconds ?? '-'}<span className="ml-1 text-xl">秒</span></div>
+      </div>
+    </div>
+  );
+}
+
+function PlayerBoard({ player, guessResult }: { player: ClientPlayer; guessResult?: LastGuessResult | null }) {
+  return (
+    <div className={`rounded-[2rem] border p-4 transition ${player.isCurrent ? 'border-sky-300 bg-sky-50/75 shadow-[0_0_36px_rgba(56,189,248,0.32)] backdrop-blur-xl' : 'border-white/70 bg-white/55 shadow-soft backdrop-blur-xl'}`}>
       <div className="mb-3 flex items-center justify-between gap-2">
-        <div className="min-w-0">
+        <div className="relative min-w-0">
           <p className="truncate text-lg font-black text-slate-900">{player.name}</p>
           <p className="text-xs font-bold text-slate-400">{player.isHost ? 'Host' : 'Player'}{player.rank ? ` / ${player.rank}位` : ''}</p>
+          <GuessResultCard result={guessResult ?? null} />
         </div>
         <div className="flex items-center gap-2">
           {player.isFinished && <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-700">上がり</span>}
@@ -399,6 +568,48 @@ function PlayerBoard({ player }: { player: ClientPlayer }) {
         </div>
       </div>
       <TileRow tiles={player.hand} />
+    </div>
+  );
+}
+
+function GuessResultCard({ result }: { result: LastGuessResult | null }) {
+  if (!result) return null;
+
+  const tone = result.correct
+    ? 'border-emerald-300 bg-emerald-50/95 text-emerald-700 shadow-[0_0_24px_rgba(16,185,129,0.22)]'
+    : 'border-rose-300 bg-rose-50/95 text-rose-700 shadow-[0_0_24px_rgba(244,63,94,0.20)]';
+
+  return (
+    <div
+      key={result.id}
+      className={`pointer-events-none absolute left-0 top-full z-30 mt-2 flex items-center gap-2 rounded-2xl border px-3 py-2 backdrop-blur-md ${tone} [animation:guess-result-pop_1.2s_ease-out_forwards]`}
+    >
+      <span className="flex h-9 w-8 items-center justify-center rounded-xl bg-white text-lg font-black">{result.value}</span>
+      <span className="whitespace-nowrap text-xs font-black uppercase tracking-[0.18em]">{result.correct ? 'Hit' : 'Miss'}</span>
+    </div>
+  );
+}
+
+function SeVolumeControl({ seVolume, setSeVolume }: { seVolume: number; setSeVolume: (value: number) => void }) {
+  const percent = Math.round(seVolume * 100);
+
+  return (
+    <div className="glass rounded-[2.2rem] p-4 sm:p-5">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="label">SE / SE調整</p>
+        <span className="rounded-full bg-white/75 px-3 py-1.5 text-xs font-black text-slate-600">
+          {percent === 0 ? 'Mute' : `${percent}%`}
+        </span>
+      </div>
+      <input
+        className="w-full accent-slate-900"
+        type="range"
+        min={0}
+        max={100}
+        value={percent}
+        onChange={(event) => setSeVolume(Number(event.target.value) / 100)}
+      />
+      <p className="mt-2 text-xs font-semibold leading-5 text-slate-400">この端末だけに保存されます</p>
     </div>
   );
 }

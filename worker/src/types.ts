@@ -8,6 +8,7 @@ export type LogType =
   | 'guess'
   | 'correct'
   | 'wrong'
+  | 'timeout'
   | 'finish'
   | 'game-over'
   | 'system';
@@ -17,6 +18,7 @@ export interface GameSettings {
   maxPlayers: number;
   handSize: number;
   allowSpectators: boolean;
+  turnTimeLimitSeconds: number;
 }
 
 export interface PersonBase {
@@ -63,6 +65,15 @@ export interface DealCheck {
   message: string;
 }
 
+export interface LastGuessResult {
+  id: string;
+  playerId: string;
+  playerName: string;
+  value: number;
+  correct: boolean;
+  at: number;
+}
+
 export interface RoomData {
   roomId: string;
   initialized: boolean;
@@ -74,6 +85,9 @@ export interface RoomData {
   hands: Record<string, Tile[]>;
   deck: number[];
   currentPlayerId?: string;
+  turnEndsAt?: number;
+  emptyRoomCleanupAt?: number;
+  lastGuessResult?: LastGuessResult;
   rankings: RankingEntry[];
   logs: GameLog[];
   createdAt: number;
@@ -123,6 +137,8 @@ export interface ClientView {
   spectators: ClientSpectator[];
   currentPlayerId?: string;
   currentPlayerName?: string;
+  turnEndsAt?: number;
+  lastGuessResult?: LastGuessResult;
   rankings: RankingEntry[];
   logs: GameLog[];
   dealCheck: DealCheck;
